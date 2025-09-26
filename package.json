@@ -1,0 +1,17 @@
+{
+  "name": "my-cursor",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch index.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.12.2",
+    "dotenv": "^16.5.0",
+    "readline-sync": "^1.4.10"
+  }
+}
