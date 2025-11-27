@@ -2,121 +2,187 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import readlineSync from 'readline-sync';
 import { exec } from 'node:child_process';
+import os from "os";
 
 dotenv.config();
-const MODEL_URL = process.env.MODEL_URL || 'http://localhost:12434/engines/v1/chat/completions';
-const MODEL = process.env.MODEL || 'ai/gpt-oss:latest';
 
+// API Model from OpenRouter
+const MODEL_URL = process.env.MODEL_URL;
+const MODEL = process.env.MODEL;
+const API_KEY = process.env.API_KEY;
+
+const HEADERS = {
+  "Authorization": `Bearer ${API_KEY}`,
+  "X-OpenRouter-Api-Key": API_KEY,
+  "HTTP-Referer": "http://localhost",
+  "X-Title": "CLI Agent",
+  "Content-Type": "application/json",
+};
 
 const SYSTEM_PROMPT = `
 You are an expert assistant with START, PLAN, ACTION, OBSERVATION and OUTPUT states.
-Do these steps iteratively to complete the user task.
-START: Initial state where you receive the user prompt.
-PLAN: Formulate a plan to achieve the user's goal using the Available Tools.
-ACTION: Execute the plan by calling the appropriate Available Tools with necessary inputs.
-OBSERVATION: Receive the OUTPUT from the ACTION taken. If the task is not complete, go back to PLAN with the new information and current state of the task. If the task is complete, proceed to OUTPUT.
-OUTPUT: Return the AI response based on START prompt
 
-Strictly follow JSON output format as shown in example
+STEP0: Before generating ANY shell command, the assistant MUST call detectOS tool to determine the OS. (Only once)
+
+START → PLAN → ACTION → OBSERVATION → repeat if needed → OUTPUT.
+
+Strictly follow JSON output format.
 
 Available Tools:
-- function getWeatherInfo(cityname): Returns the current weather details of the given city.
-- function executeCommand(command): Executes the given shell command and returns the output.
+- function getWeatherInfo(cityname)
+- function executeCommand(command)
+- function detectOS(): returns one of ["windows", "linux", "mac"]
 
-Example:
-START
-{ "type": "user", "user": "What is the sum of weather of Patiala and Mohali?" }
-{ "type": "PLAN", "plan": "I will call the getWeatherInfo for Patiala" }
-{ "type": "ACTION", "function": "getWeatherInfo", "input": "patiala" }
-{ "type": "OBSERVATION", "observation": "10°C" }
-{ "type": "PLAN", "plan": "I will call getWeatherInfo for Mohali" }
-{ "type": "ACTION", "function": "getWeatherInfo", "input": "mohali" }
-{ "type": "OBSERVATION", "observation": "14°C" }
-{ "type": "OUTPUT", "output": "The sum of weather of Patiala and Mohali is 24 degrees" }
+RULES:
+1. ALWAYS call detectOS BEFORE generating shell commands.
+2. Based on detectOS output, generate OS-specific commands.
+
+WINDOWS COMMAND EXAMPLES:
+- mkdir folder
+- New-Item -Path "folder\\file.txt" -ItemType File -Value "hello"
+- Set-Content -Path "folder\\file.txt" -Value "hello"
+
+LINUX/MAC COMMAND EXAMPLES:
+- mkdir -p folder
+- echo "hello" > folder/file.txt
+
+The assistant must NEVER output commands for the wrong OS.
 `;
 
 // ------------------------ TOOL FUNCTIONS ------------------------
+
 function executeCommand(command) {
   return new Promise((resolve) => {
     exec(command, (err, stdout, stderr) => {
-      if (err) {
-        resolve(`Command failed: ${err.message}\nstdout: ${stdout}\nstderr: ${stderr}`);
-      } else {
-        resolve(`stdout: ${stdout}\nstderr: ${stderr}`);
-      }
+      resolve({
+        stdout,
+        stderr,
+        exit_code: err ? err.code : 0
+      });
     });
   });
 }
 
 function getWeatherInfo(cityname) {
-  return `${cityname} has 43°C (mock data)`; // mock data for testing
+  return `${cityname} has 43°C (mock data)`;
+}
+
+function detectOS() {
+  const platform = os.platform();
+
+  // If running in Git Bash / WSL, treat as Windows
+  if (process.env.OSTYPE?.includes("msys") || platform === "win32") {
+    return "windows";
+  }
+  if (platform === "linux") return "linux";
+  if (platform === "darwin") return "mac";
+
+  return "unknown";
 }
 
 const TOOLS_MAP = {
   getWeatherInfo,
   executeCommand,
+  detectOS,
 };
 
-// ------------------------ HELPER FUNCTIONS ------------------------
-async function callGroq(data,messages) {
+// ------------------------ API CALL FUNCTION ------------------------
+
+async function callModel(data, messages) {
   try {
-    const res = await axios.post(
-      MODEL_URL,
-      data,
-      { headers: { 'Content-Type': 'application/json' } }
-    );
+    const res = await axios.post(MODEL_URL, data, { headers: HEADERS });
+
     const reply = res.data.choices[0].message.content;
-    messages.push({ role: 'assistant', content: reply });
-    console.log(`\n------------------------------------`)
-    console.log('🤖 Raw model output:', reply);
-    console.log(`------------------------------------\n`)
+    messages.push({ role: "assistant", content: reply });
+
+    console.log("\n------------------------------------");
+    console.log("🤖 Raw model output:", reply);
+    console.log("------------------------------------\n");
+
     return reply;
+
   } catch (error) {
-    console.error('Error:', error.response?.data || error.message);
-    return JSON.stringify({ step: "ERROR", tool: "", input: "", content: error.message });
+    console.error("❌ OpenRouter Error:", error.response?.data || error.message);
+
+    return JSON.stringify({
+      type: "ERROR",
+      content: error.message
+    });
   }
 }
 
 // ------------------------ MAIN LOOP ------------------------
+
 async function main() {
   const userQuery = readlineSync.question("What do you want me to do...? ");
 
   let messages = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: JSON.stringify({ type: "user", user: userQuery }) }
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user", content: JSON.stringify({ type: "user", user: userQuery }) }
   ];
 
   while (true) {
-  const data = {
-    model: MODEL,
-    response_format: { type: 'json_object' },
-    messages,
-  };
 
-  const response = await callGroq(data,messages);
+    const data = {
+      model: MODEL,
+      response_format: { type: "json_object" },
+      messages,
+    };
 
-  let call;
-  try {
-    call = JSON.parse(response);
-  } catch (e) {
-    console.error("Failed to parse model output:", response);
-    break;
+    const response = await callModel(data, messages);
+
+    let call;
+    try {
+      call = JSON.parse(response);
+    } catch (e) {
+      console.error("❌ JSON PARSE ERROR:", response);
+      break;
+    }
+
+    if (call.type === "OUTPUT") {
+      console.log(`\n✅ agent: ${call.output}\n`);
+      break;
+    }
+
+    // ----- ACTION -----
+    if (call.state === "ACTION") {
+
+      const fn = TOOLS_MAP[call.action.function];
+
+      let input = null;
+
+      // Handle 3 types:
+      // 1. { arguments: { command: "..." } }
+      // 2. { arguments: ["..."] }
+      // 3. { command: "..." }
+      if (typeof call.action.arguments === "object" && !Array.isArray(call.action.arguments)) {
+        input = call.action.arguments.command ?? call.action.arguments;
+      } else if (Array.isArray(call.action.arguments)) {
+        input = call.action.arguments[0]; // take first element
+      } else if (call.action.command) {
+        input = call.action.command;
+      }
+
+      const observation = await fn(input);
+
+      messages.push({
+        role: "developer",
+        content: JSON.stringify({
+          state: "OBSERVATION",
+          observation
+        })
+      });
+
+      continue;
+    }
+
+
+
+    messages.push({
+      role: "user",
+      content: JSON.stringify(call)
+    });
   }
-
-  if (call.type === "OUTPUT") {
-    console.log(`\n✅ agent: ${call.output}\n`);
-    break;
-  } else if (call.type === "ACTION") {
-    const fn = TOOLS_MAP[call.function];
-    const observation = await fn(call.input);
-    const obs = { type: "OBSERVATION", observation };
-    messages.push({ role: 'DEVELOPER', content: JSON.stringify(obs) });
-  } else {
-    // For PLAN or START types, we don't push as assistant yet
-    messages.push({ role: 'user', content: JSON.stringify(call) });
-  }
-}
-
 }
 
 main();
